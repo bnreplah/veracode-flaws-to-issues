@@ -1,3 +1,4 @@
+name: Veracode GitHub Action to ADO Test Workflow
 on: 
   push:
   workflow_dispatch:

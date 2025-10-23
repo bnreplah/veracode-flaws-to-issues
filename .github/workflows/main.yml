@@ -1,7 +1,36 @@
 on: 
   push:
   workflow_dispatch:
-
+    inputs:
+      reponame:
+        type: string
+        required: false
+        description: repo name to build
+        default: veracode/verademo
+      adopat:
+        type: string
+        required: true
+        description: ADO PAT
+      adoorg:
+        type: string
+        required: true
+        description: ADO Org name
+      adotype:
+        description: ADO work item type name
+        type: choice
+        options:
+          - Bug
+          - Issue
+          - Task
+          - Epic
+          - Feature
+          - Test Case
+          - User Story
+        required: false
+      adoproj:
+        type: string
+        description: ADO project name
+      
 jobs:
 
   # This step will build the maven application
@@ -11,7 +40,7 @@ jobs:
     
     - uses: actions/checkout@v5
       with:
-        repository: veracode/verademo
+        repository: ${{ github.event.inputs.reponame }}
       
     - uses: actions/setup-java@v5
       with: 

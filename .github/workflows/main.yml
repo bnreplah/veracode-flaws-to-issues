@@ -168,7 +168,7 @@ jobs:
           #commitHash:
             #description: commit hash
             #required: false
-          repo_name: ${{ github.event.inputs.reponame || variables.REPO_NAME }}
+          repo_name: ${{ github.event.inputs.reponame || vars.REPO_NAME }}
             #description: repo name
             #required: false
           ADO_PAT: ${{ github.event.inputs.adopat || secrets.ADO_PAT }}

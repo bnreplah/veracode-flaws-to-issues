@@ -97,3 +97,60 @@ jobs:
           source-base-path_1: "com/veracode:src/main/java/com/veracode" 
           source-base-path_2: "WEB-INF:src/main/webapp/WEB-INF"
           commit-hash: ${{ GITHUB.SHA }}
+          dts_type: 'ADO'
+            #description: 'Type of defect tracking system to use (GITHUB or ADO)'
+            #required: false
+            #default: 'GITHUB'
+          #scan-results-json:
+            #description: 'Scan results file'
+            #required: true
+            #default: 'filtered_results.json'
+          #github-token:
+            #description: 'GitHub token to access the repo'
+            #default: ${{ github.token }}
+            #required: true
+          wait-time: '2'
+            #description: 'Delay (in seconds) between entering Issues into GitHub (due to rate limiting)'
+            #required: false
+            #default: '2'
+          #source_base_path_1:
+            #description: 'Rewrite 1'
+            #required: false
+          #source_base_path_2:
+            #description: 'Rewrite 2'
+            #required: false
+          #source_base_path_3:
+            #description: 'Rewrite 3'
+            #required: false
+          #repo_owner:
+            #description: 'repo owner'
+            #required: false
+          fail_build: true
+            #description: fail pipeline upon findings (true | false)
+            #required: false
+          autoCloseFindings: true
+            #description: 'Automatically close issues/work items that are no longer present in scan results (true | false)'
+            #required: false
+            #default: 'false'
+          debug: true
+            #description: enable debug logging
+            #required: false
+          #commitHash:
+            #description: commit hash
+            #required: false
+          repo_name: ${{ github.event.inputs.reponame || variables.REPO_NAME }}
+            #description: repo name
+            #required: false
+          ADO_PAT: ${{ github.event.inputs.adopat || secrets.ADO_PAT }}
+            #description: 'Azure DevOps Personal Access Token'
+            #required: false
+          ADO_ORG: ${{ github.event.inputs.adoorg || secrets.ADO_ORG }}
+            #description: 'Azure DevOps Organization'
+            #required: false
+          ADO_PROJECT: ${{ github.event.inputs.adoproj || secrets.ADO_PROJECT }}
+            #description: 'Azure DevOps Project'
+            #required: false
+          ADO_WORK_ITEM_TYPE: ${{ github.event.inputs.adotype || secrets.ADO_WORK_ITEM_TYPE }}
+            #description: 'Azure DevOps Work Item Type (Bug, Issue, Task, Epic, Feature, Test Case, User Story)'
+            #required: false
+            #default: 'Issue'

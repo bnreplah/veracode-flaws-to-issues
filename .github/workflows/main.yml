@@ -6,15 +6,15 @@ on:
       dts_type:
         description: 'Type of defect tracking system to use (GITHUB or ADO)'
         required: false
-        default: 'GITHUB'
+        type: choice
+        options:
+          - GITHUB
+          - ADO
+        default: GITHUB
       scan-results-json:
         description: 'Scan results file'
         required: false
         default: 'filtered_results.json'
-      #github-token:
-      #  description: 'GitHub token to access the repo'
-      #  default: ${{ github.token }}
-      #  required: true
       wait-time:
         description: 'Delay (in seconds) between entering Issues into GitHub (due to rate limiting)'
         required: false

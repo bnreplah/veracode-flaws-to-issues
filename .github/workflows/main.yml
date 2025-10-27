@@ -3,18 +3,82 @@ on:
   push:
   workflow_dispatch:
     inputs:
+      dts_type:
+        description: 'Type of defect tracking system to use (GITHUB or ADO)'
+        required: false
+        default: 'GITHUB'
+      scan-results-json:
+        description: 'Scan results file'
+        required: false
+        default: 'filtered_results.json'
+      #github-token:
+      #  description: 'GitHub token to access the repo'
+      #  default: ${{ github.token }}
+      #  required: true
+      wait-time:
+        description: 'Delay (in seconds) between entering Issues into GitHub (due to rate limiting)'
+        required: false
+        default: '2'
+      source_base_path_1:
+        description: 'Rewrite 1'
+        type: string
+        required: false
+      source_base_path_2:
+        description: 'Rewrite 2'
+        type: string
+        required: false
+      source_base_path_3:
+        description: 'Rewrite 3'
+        type: string
+        required: false
+      repo_owner:
+        description: 'repo owner'
+        required: false
+      fail_build:
+        description: fail pipeline upon findings (true | false)
+        type: boolean
+        default: false
+        required: false
+      autoCloseFindings:
+        description: 'Automatically close issues/work items that are no longer present in scan results (true | false)'
+        required: false
+        default: false
+      debug:
+        description: enable debug logging
+        type: boolean
+        default: false
+        required: false
+      #commitHash:
+      #  description: commit hash
+      #  required: false
+      #repo_name:
+      #  description: repo name
+      #  required: false
+      #ADO_PAT:
+      #  description: 'Azure DevOps Personal Access Token'
+      #  required: false
+      #ADO_ORG:
+      #  description: 'Azure DevOps Organization'
+      #  required: false
+      #ADO_PROJECT:
+      #  description: 'Azure DevOps Project'
+      #  required: false
+      #ADO_WORK_ITEM_TYPE:
+      #  description: 'Azure DevOps Work Item Type (Bug, Issue, Task, Epic, Feature, Test Case, User Story)'
+      #  required: false
+      #  default: 'Issue'
       reponame:
         type: string
         required: false
         description: repo name to build
         default: veracode/verademo
-      adopat:
+      adopat: # opting for the enviornment variable one that is set instead
         type: string
-        required: true
+        required: false
         description: ADO PAT
       adoorg:
         type: string
-        required: true
+        required: false
         description: ADO Org name
       adotype:
         description: ADO work item type name
@@ -28,37 +92,53 @@ on:
           - Test Case
           - User Story
         required: false
+        default: Issue
       adoproj:
         type: string
         description: ADO project name
+        required: false
       
 jobs:
 
   # This step will build the maven application
+  
   build:
     runs-on: ubuntu-latest
     steps:
-    
-    - uses: actions/checkout@v5
-      with:
-        repository: ${{ github.event.inputs.reponame }}
-      
-    - uses: actions/setup-java@v5
-      with: 
-        java-version: 1.8
+      - name: check inputs
+        run: |
+          echo ${{ github.repository.name }}
+          echo ${{ workflow_dispatch.inputs.dts_type }}
+          echo ${{ workflow_dispatch.inputs.scan-results-json }}
+          echo ${{ workflow_dispatch.inputs.wait-time }}
+          echo ${{workflow_dispatch.inputs.source_base_path_1 }}
+          echo ${{workflow_dispatch.inputs.source_base_path_2 }}
+          echo ${{workflow_dispatch.inputs.source_base_path_3  }}
+          echo ${{workflow_dispatch.inputs.repo_owner }}
+          echo ${{workflow_dispatch.inputs.fail_build }}
+          echo ${{workflow_dispatch.inputs.autoCloseFindings}}
+          echo ${{workflow_dispatch.inputs.debug}}
+            
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.event.inputs.reponame }}
         
-    - name: Cache Maven packages
-      uses: actions/cache@v4.3
-      with:
-        path: ~/.m2
-        key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
-    - name: Build with Maven
-      run: mvn clean package
+      - uses: actions/setup-java@v5
+        with: 
+          java-version: 1.8
           
-    - uses: actions/upload-artifact@v4.6.2
-      with:
-        name: verademo.war
-        path: target/verademo.war
+      - name: Cache Maven packages
+        uses: actions/cache@v4.3
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+      - name: Build with Maven
+        run: mvn clean package
+            
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: verademo.war
+          path: target/verademo.war
         
 
   # This step will run the Veracode pipeline scan 
@@ -93,16 +173,24 @@ jobs:
         #continue-on-error: true
       
       - name: save standard results
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v5
         with:
           name: PipelineScanResults
           path: results.json
       
       - name: save filtered results
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v5
         with:
           name: filtered-results
           path: filtered_results.json
+
+
+
+#####################################################################################################
+# Import flaws 
+# The actual testing of the action
+#
+#####################################################################################################
         
   import_flaws_job:
     runs-on: ubuntu-latest
@@ -117,7 +205,11 @@ jobs:
         uses: actions/download-artifact@v5
         with:
           name: filtered-results
-
+      - name: confirm Flaw File Download
+        run: | 
+          ls -la
+          file */*
+          
       - name: Flaw importer action step
         id: import
         uses: ./

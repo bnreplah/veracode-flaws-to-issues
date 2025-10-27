@@ -1,6 +1,8 @@
 name: Veracode GitHub Action to ADO Test Workflow
-on: 
+on:
   push:
+    branches:
+      - ADO_workitems
   workflow_dispatch:
     inputs:
       dts_type:
@@ -97,7 +99,7 @@ on:
         type: string
         description: ADO project name
         required: false
-      
+  
 jobs:
 
   # This step will build the maven application

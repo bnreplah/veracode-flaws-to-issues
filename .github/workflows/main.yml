@@ -1,18 +1,15 @@
 name: Veracode GitHub Action to ADO Test Workflow
 on:
-  push:
-    branches:
-      - ADO_workitems
   workflow_dispatch:
     inputs:
-      dts_type:
-        description: 'Type of defect tracking system to use (GITHUB or ADO)'
-        required: false
-        type: choice
-        options:
-          - GITHUB
-          - ADO
-        default: GITHUB
+      #dts_type:
+      #  description: 'Type of defect tracking system to use (GITHUB or ADO)'
+      #  required: false
+      #  type: choice
+      #  options:
+      #    - GITHUB
+      #    - ADO
+      #  default: GITHUB
       scan-results-json:
         description: 'Scan results file'
         required: false
@@ -50,25 +47,6 @@ on:
         type: boolean
         default: false
         required: false
-      #commitHash:
-      #  description: commit hash
-      #  required: false
-      #repo_name:
-      #  description: repo name
-      #  required: false
-      #ADO_PAT:
-      #  description: 'Azure DevOps Personal Access Token'
-      #  required: false
-      #ADO_ORG:
-      #  description: 'Azure DevOps Organization'
-      #  required: false
-      #ADO_PROJECT:
-      #  description: 'Azure DevOps Project'
-      #  required: false
-      #ADO_WORK_ITEM_TYPE:
-      #  description: 'Azure DevOps Work Item Type (Bug, Issue, Task, Epic, Feature, Test Case, User Story)'
-      #  required: false
-      #  default: 'Issue'
       reponame:
         type: string
         required: false
@@ -110,7 +88,6 @@ jobs:
       - name: check inputs
         run: |
           echo ${{ github.repository.name }}
-          echo ${{ workflow_dispatch.inputs.dts_type }}
           echo ${{ workflow_dispatch.inputs.scan-results-json }}
           echo ${{ workflow_dispatch.inputs.wait-time }}
           echo ${{workflow_dispatch.inputs.source_base_path_1 }}
@@ -134,6 +111,8 @@ jobs:
         with:
           path: ~/.m2
           key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+
+          
       - name: Build with Maven
         run: mvn clean package
             
@@ -163,8 +142,8 @@ jobs:
       - name: pipeline-scan
         run: | 
           java -jar /opt/veracode/pipeline-scan.jar \
-            -vid "${{secrets.VID}}" \
-            -vkey "${{secrets.VKEY}}" \
+            -vid "${{ secrets.VID }}" \
+            -vkey "${{ secrets.VKEY }}" \
             --fail_on_severity="Very High, High" \
             --file /tmp/verademo.war \
             -jf results.json \

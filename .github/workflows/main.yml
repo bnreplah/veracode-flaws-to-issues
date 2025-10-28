@@ -83,15 +83,15 @@ jobs:
       - name: check inputs
         run: |
           echo ${{ github.repository.name }}
-          echo ${{ workflow_dispatch.inputs.scan-results-json }}
-          echo ${{ workflow_dispatch.inputs.wait-time }}
-          echo ${{workflow_dispatch.inputs.source_base_path_1 }}
-          echo ${{workflow_dispatch.inputs.source_base_path_2 }}
-          echo ${{workflow_dispatch.inputs.source_base_path_3  }}
-          echo ${{workflow_dispatch.inputs.repo_owner }}
-          echo ${{workflow_dispatch.inputs.fail_build }}
-          echo ${{workflow_dispatch.inputs.autoCloseFindings}}
-          echo ${{workflow_dispatch.inputs.debug}}
+          echo ${{ github.event.inputs.scan-results-json }}
+          echo ${{ github.event.inputs.wait-time }}
+          echo ${ {github.event.inputs.source_base_path_1 }}
+          echo ${{ github.event.inputs.source_base_path_2 }}
+          echo ${{ github.event.inputs.source_base_path_3  }}
+          echo ${{ github.event.inputs.repo_owner }}
+          echo ${{ github.event.inputs.fail_build }}
+          echo ${{ github.event.inputs.autoCloseFindings}}
+          echo ${{ github.event.inputs.debug}}
             
       - uses: actions/checkout@v5
         with:

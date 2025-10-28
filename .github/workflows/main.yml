@@ -79,10 +79,10 @@ jobs:
         run: |
           echo ${{ github.repository.name }}
           echo ${{ github.event.inputs.wait-time }}
-          echo ${ {github.event.inputs.source_base_path_1 }}
+          echo ${{ github.event.inputs.source_base_path_1 }}
           echo ${{ github.event.inputs.source_base_path_2 }}
           echo ${{ github.event.inputs.source_base_path_3  }}
-          echo ${{ github.event.inputs.autoCloseFindings}}
+          echo ${{ github.event.inputs.autoCloseFindings }}
         
             
       - uses: actions/checkout@v5

@@ -24,32 +24,32 @@ on:
         description: 'Rewrite 3'
         type: 'string'
         required: false
-      repo_owner:
-        description: 'repo owner'
-        required: false
-      fail_build:
-        description: fail pipeline upon findings (true | false)
-        type: 'boolean'
-        default: 'false'
-        required: false
+      #repo_owner:
+      #  description: 'repo owner'
+      #  required: false
+#      fail_build:
+#        description: fail pipeline upon findings (true | false)
+#        type: 'boolean'
+#        default: 'false'
+#        required: false
       autoCloseFindings:
         description: 'Automatically close issues/work items that are no longer present in scan results (true | false)'
         required: false
         default: 'false'
-      debug:
-        description: enable debug logging
-        type: 'boolean'
-        default: 'false'
-        required: false
+#      debug:
+#        description: enable debug logging
+#        type: 'boolean'
+#        default: 'false'
+#        required: false
       reponame:
         type: string
         required: false
         description: repo name to build
         default: 'veracode/verademo'
-      adopat: # opting for the enviornment variable one that is set instead
-        type: string
-        required: false
-        description: ADO PAT
+    #  adopat: # opting for the enviornment variable one that is set instead
+    #    type: string
+    #    required: false
+    #    description: ADO PAT
       adoorg:
         type: string
         required: false

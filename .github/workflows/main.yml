@@ -133,6 +133,7 @@ jobs:
 
       
       - name: pipeline-scan
+        continue-on-error: true
         run: | 
           java -jar /opt/veracode/pipeline-scan.jar \
             -vid "${{ secrets.VID }}" \

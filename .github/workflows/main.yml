@@ -77,12 +77,12 @@ jobs:
     
       - name: check inputs
         run: |
-          echo ${{ github.repository.name }}
-          echo ${{ github.event.inputs.wait-time }}
-          echo ${{ github.event.inputs.source_base_path_1 }}
-          echo ${{ github.event.inputs.source_base_path_2 }}
-          echo ${{ github.event.inputs.source_base_path_3  }}
-          echo ${{ github.event.inputs.autoCloseFindings }}
+          echo "${{ github.repository.name }}"
+          echo "${{ github.event.inputs.wait-time }}"
+          echo "${{ github.event.inputs.source_base_path_1 }}"
+          echo "${{ github.event.inputs.source_base_path_2 }}"
+          echo "${{ github.event.inputs.source_base_path_3  }}"
+          echo "${{ github.event.inputs.autoCloseFindings }}"
         
             
       - uses: actions/checkout@v5
@@ -104,11 +104,17 @@ jobs:
       - name: list out post java set up
         run: |
           ls -la
+      - name: Java build
+        run: |
           mvn clean package -f app/pom.xml
           
         # -f app/pom.xml
           
-            
+      - name: checking after java build
+        run: |
+          ls -la
+          ls -la app/*/*
+          
       - uses: actions/upload-artifact@v5
         with:
           name: verademo.war

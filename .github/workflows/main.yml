@@ -2,11 +2,6 @@ name: Veracode GitHub Action to ADO Test Workflow
 on:
   workflow_dispatch:
     inputs:
-      scan-results-json:
-        description: 'Scan results file'
-        type: 'string'
-        required: false
-        default: 'filtered_results.json'
       wait-time:
         description: 'Delay (in seconds) between entering Issues into GitHub (due to rate limiting)'
         type: 'string'
@@ -71,7 +66,7 @@ on:
         type: string
         description: ADO project name
         required: false
-  
+  push:
 jobs:
   # This step will build the maven application
  
@@ -83,15 +78,12 @@ jobs:
       - name: check inputs
         run: |
           echo ${{ github.repository.name }}
-          echo ${{ github.event.inputs.scan-results-json }}
           echo ${{ github.event.inputs.wait-time }}
           echo ${ {github.event.inputs.source_base_path_1 }}
           echo ${{ github.event.inputs.source_base_path_2 }}
           echo ${{ github.event.inputs.source_base_path_3  }}
-          echo ${{ github.event.inputs.repo_owner }}
-          echo ${{ github.event.inputs.fail_build }}
           echo ${{ github.event.inputs.autoCloseFindings}}
-          echo ${{ github.event.inputs.debug}}
+        
             
       - uses: actions/checkout@v5
         with:

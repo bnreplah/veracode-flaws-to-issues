@@ -112,7 +112,7 @@ jobs:
       - uses: actions/upload-artifact@v5
         with:
           name: verademo.war
-          path: target/verademo.war
+          path: app/target/verademo.war
         
 
   # This step will run the Veracode pipeline scan 

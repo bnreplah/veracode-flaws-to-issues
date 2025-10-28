@@ -89,6 +89,21 @@ async function importFlawsToADO(params) {
     console.log(`Found ${existingWorkItems.length} existing work items to check against`);
 
     // Track which work items are still active (not closed)
+    console.log(`\n=== Work Item State Analysis ===`);
+    const stateCounts = {};
+    existingWorkItems.forEach(wi => {
+        const state = wi.fields['System.State'] || 'Unknown';
+        stateCounts[state] = (stateCounts[state] || 0) + 1;
+        if (debug === 'true') {
+            console.log(`Work Item ${wi.id}: State="${state}", Title="${wi.fields['System.Title']?.substring(0, 50)}..."`);
+        }
+    });
+    
+    console.log(`Work item state distribution:`);
+    Object.entries(stateCounts).forEach(([state, count]) => {
+        console.log(`  ${state}: ${count} work items`);
+    });
+    
     const activeWorkItems = existingWorkItems.filter(wi => {
         const state = wi.fields['System.State'] || 'Unknown';
         return state !== 'Done' && state !== 'Resolved' && state !== 'Removed';
@@ -161,9 +176,10 @@ async function importFlawsToADO(params) {
     }
 
     // Close work items that are no longer present in the scan results
-    let closedCount = 0;
+    closedCount = 0;
     if (autoCloseFindings) {
         console.log(`\nChecking for work items to close (flaws not found in current scan)...`);
+        console.log(`Processing ${activeWorkItems.length} active work items against ${processedFlawIds.size} processed flaw IDs`);
         
         for (const workItem of activeWorkItems) {
         try {
@@ -177,7 +193,7 @@ async function importFlawsToADO(params) {
             
             if (!isStillPresent) {
                 console.log(`Closing work item ${workItemId} - flaw no longer found in scan: "${title}"`);
-                await closeWorkItem(adoPatchClient, adoOrg, adoProject, workItemId, commit_hash, debug);
+                await closeWorkItem(adoPatchClient, adoOrg, adoProject, workItemId, 'NOT_FOUND', commit_hash, debug);
                 closedCount++;
                 
                 // Wait between API calls to avoid rate limiting
@@ -188,9 +204,13 @@ async function importFlawsToADO(params) {
                 }
             }
         } catch (error) {
-            console.error(`Failed to close work item ${workItem.id}: ${error.message}`);
-            if (fail_build === 'true') {
-                throw error;
+            if (error.response && error.response.status === 400) {
+                console.log(`Work item ${workItem.id} not found (may have been deleted) - skipping closure: "${title}"`);
+            } else {
+                console.error(`Failed to close work item ${workItem.id}: ${error.message}`);
+                if (fail_build === 'true') {
+                    throw error;
+                }
             }
         }
         }
@@ -224,7 +244,7 @@ async function getExistingWorkItems(adoQueryClient, adoClient, adoOrg, adoProjec
             try {
                 const url = `/${encodedOrg}/${encodedProject}/_apis/wit/wiql?api-version=${apiVersion}`;
                 const query = {
-                    query: "SELECT [System.Id], [System.Title], [System.State], [System.Tags], [System.ChangedDate] FROM WorkItems WHERE [System.Tags] Contains 'Veracode' ORDER BY [System.ChangedDate] DESC"
+                    query: `SELECT [System.Id], [System.Title], [System.State], [System.Tags], [System.ChangedDate] FROM WorkItems WHERE [System.Tags] Contains 'Veracode' AND [System.TeamProject] = '${adoProject}' ORDER BY [System.ChangedDate] DESC`
                 };
 
                 if (debug === 'true') {
@@ -237,11 +257,21 @@ async function getExistingWorkItems(adoQueryClient, adoClient, adoOrg, adoProjec
                 const workItemIds = response.data.workItems.map(wi => wi.id);
 
                 if (workItemIds.length === 0) {
-                    console.log('No existing work items with Veracode tags found');
+                    console.log(`No existing work items with Veracode tags found in project '${adoProject}'`);
+                    if (debug === 'true') {
+                        console.log('Query executed successfully but returned no results');
+                        console.log('This could mean:');
+                        console.log('  1. No work items exist with "Veracode" tag in this project');
+                        console.log('  2. The project name might be incorrect');
+                        console.log('  3. The WIQL query syntax might need adjustment');
+                    }
                     return [];
                 }
 
-                console.log(`Found ${workItemIds.length} existing work items with Veracode tags using API version ${apiVersion}`);
+                console.log(`Found ${workItemIds.length} existing work items with Veracode tags in project '${adoProject}' using API version ${apiVersion}`);
+                if (debug === 'true') {
+                    console.log('Work item IDs found:', workItemIds);
+                }
 
                 // Get full details for each work item with pagination (max 200 per request)
                 const workItems = [];
@@ -530,37 +560,56 @@ async function reopenWorkItem(adoClient, adoOrg, adoProject, workItemId, params)
     const { source_base_path_1, source_base_path_2, source_base_path_3, commit_hash, debug } = params;
     
     const url = `/${adoOrg}/${adoProject}/_apis/wit/workitems/${workItemId}?api-version=7.0`;
-    const payload = [
-        {
-            op: 'replace',
-            path: '/fields/System.State',
-            value: systemState
-        },
-        {
-            op: 'add',
-            path: '/fields/System.History',
-            value: `Reopened by Veracode scan - Commit: ${commit_hash || 'Unknown'}`
-        }
-    ];
-
-    if (debug === 'true') {
-        console.log('Reopening work item with payload:', JSON.stringify(payload, null, 2));
-    }
-
-    try {
-        const response = await adoClient.patch(url, payload, {
-            headers: {
-                'Content-Type': 'application/json-patch+json'
+    
+    // Try different "open" states for different ADO processes
+    const candidateStates = ['To Do', 'Active', 'New', 'Open'];
+    
+    for (const state of candidateStates) {
+        const payload = [
+            {
+                op: 'replace',
+                path: '/fields/System.State',
+                value: state
+            },
+            {
+                op: 'add',
+                path: '/fields/System.History',
+                value: `Reopened by Veracode scan - Commit: ${commit_hash || 'Unknown'}`
             }
-        });
+        ];
+
         if (debug === 'true') {
-            console.log('Work item reopened successfully:', response.data.id);
+            console.log(`Attempting to reopen work item ${workItemId} using state "${state}" with payload:`, JSON.stringify(payload, null, 2));
         }
-        return response.data;
-    } catch (error) {
-        console.error(`Failed to reopen work item ${workItemId}:`, error.message);
-        throw error;
+
+        try {
+            const response = await adoClient.patch(url, payload, {
+                headers: {
+                    'Content-Type': 'application/json-patch+json'
+                }
+            });
+            if (debug === 'true') {
+                console.log(`Work item ${workItemId} reopened successfully with state "${state}"`);
+            }
+            return response.data;
+        } catch (error) {
+            const status = error?.response?.status;
+            if (debug === 'true') {
+                console.log(`Reopening with state "${state}" failed${status ? ` (status ${status})` : ''}. Trying next candidate...`);
+                if (error?.response?.data) {
+                    console.log('ADO error response:', JSON.stringify(error.response.data));
+                }
+            }
+            // Try next candidate state on 400/422 errors, otherwise rethrow
+            if (status && (status === 400 || status === 422)) {
+                continue;
+            }
+            throw error;
+        }
     }
+
+    // If none of the states worked, throw a clear error
+    throw new Error(`Failed to reopen work item ${workItemId}: none of the candidate states were accepted (${candidateStates.join(', ')})`);
 }
 
 async function createWorkItem(adoClient, adoOrg, project, workItemType, flaw, params) {
@@ -591,15 +640,16 @@ async function createWorkItem(adoClient, adoOrg, project, workItemType, flaw, pa
     const url = `/${adoOrg}/${project}/_apis/wit/workitems/$${workItemType}?api-version=7.0`;
     const tags = cweTag ? `Veracode;Security;${cweTag}` : 'Veracode;Security';
     
-    // Create title in the same format as GitHub action
+    // Create title without duplication
     let title;
     if (scanType === 'pipeline') {
-        // Pipeline: issue_type + VeracodeFlawID
-        title = `${cweName} ` + createVeracodeFlawId(flaw, scanType);
+        // Pipeline: Just use the VeracodeFlawID which already contains the CWE name
+        title = createVeracodeFlawId(flaw, scanType);
     } else {
-        // Policy: cwe_name + category + VeracodeFlawID
+        // Policy: Add category to the VeracodeFlawID
         const category = flaw.finding_details?.finding_category?.name || 'Unknown';
-        title = `${cweName} ('${category}') ` + createVeracodeFlawId(flaw, scanType);
+        const baseTitle = createVeracodeFlawId(flaw, scanType);
+        title = `${baseTitle} ('${category}')`;
     }
     
     const payload = [
@@ -752,39 +802,68 @@ function mapSeverity(veracodeSeverity) {
     return severityMap[veracodeSeverity] || '3 - Medium';
 }
 
-async function closeWorkItem(adoClient, adoOrg, adoProject, workItemId, commit_hash, debug) {
+async function closeWorkItem(adoClient, adoOrg, adoProject, workItemId, resolution, commit_hash, debug) {
     const url = `/${adoOrg}/${adoProject}/_apis/wit/workitems/${workItemId}?api-version=7.0`;
-    const payload = [
-        {
-            op: 'replace',
-            path: '/fields/System.State',
-            value: 'Completed'
-        },
-        {
-            op: 'add',
-            path: '/fields/System.History',
-            value: `This work item has been automatically closed by Veracode automation because the flaw is no longer present in the latest scan results. Closed by Veracode scan from commit ${commit_hash || 'Unknown'} on GitHub.`
-        }
-    ];
 
-    if (debug === 'true') {
-        console.log('Closing work item with payload:', JSON.stringify(payload, null, 2));
+    // Create appropriate closure message based on resolution
+    let closureMessage;
+    if (resolution === 'MITIGATED') {
+        closureMessage = `This work item has been automatically closed by Veracode automation because the finding has been mitigated (APPROVED status). Closed by Veracode scan from commit ${commit_hash || 'Unknown'}.`;
+    } else if (resolution === 'CLOSED BY SCAN') {
+        closureMessage = `This work item has been automatically closed by Veracode automation because the flaw is no longer present in the latest scan results. Closed by Veracode scan from commit ${commit_hash || 'Unknown'}.`;
+    } else {
+        closureMessage = `This work item has been automatically closed by Veracode automation. Closed by Veracode scan from commit ${commit_hash || 'Unknown'}.`;
     }
 
-    try {
-        const response = await adoClient.patch(url, payload, {
-            headers: {
-                'Content-Type': 'application/json-patch+json'
+    // Different ADO processes have different state names. Try a few common ones.
+    const candidateStates = ['Done', 'Closed', 'Resolved', 'Completed'];
+
+    for (const state of candidateStates) {
+        const payload = [
+            {
+                op: 'replace',
+                path: '/fields/System.State',
+                value: state
+            },
+            {
+                op: 'add',
+                path: '/fields/System.History',
+                value: closureMessage
             }
-        });
+        ];
+
         if (debug === 'true') {
-            console.log('Work item closed successfully:', response.data.id);
+            console.log(`Attempting to close work item ${workItemId} using state "${state}" with payload:`, JSON.stringify(payload, null, 2));
         }
-        return response.data;
-    } catch (error) {
-        console.error(`Failed to close work item ${workItemId}:`, error.message);
-        throw error;
+
+        try {
+            const response = await adoClient.patch(url, payload, {
+                headers: {
+                    'Content-Type': 'application/json-patch+json'
+                }
+            });
+            if (debug === 'true') {
+                console.log(`Work item ${workItemId} closed successfully with state "${state}"`);
+            }
+            return response.data;
+        } catch (error) {
+            const status = error?.response?.status;
+            if (debug === 'true') {
+                console.log(`Closing with state "${state}" failed${status ? ` (status ${status})` : ''}. Trying next candidate...`);
+                if (error?.response?.data) {
+                    console.log('ADO error response:', JSON.stringify(error.response.data));
+                }
+            }
+            // Try next candidate state on 400/422 errors, otherwise rethrow
+            if (status && (status === 400 || status === 422)) {
+                continue;
+            }
+            throw error;
+        }
     }
+
+    // If none of the states worked, throw a clear error
+    throw new Error(`Failed to close work item ${workItemId}: none of the candidate states were accepted (${candidateStates.join(', ')})`);
 }
 
 async function closePipelineFlaws(adoClient, adoOrg, adoProject, activeWorkItems, processedFlawIds, commit_hash, debug){
@@ -803,7 +882,7 @@ async function closePipelineFlaws(adoClient, adoOrg, adoProject, activeWorkItems
             
             if (!isStillPresent) {
                 console.log(`Closing work item ${workItemId} - flaw no longer found in scan: "${title}"`);
-                await closeWorkItem(adoClient, adoOrg, adoProject, workItemId, flawResolution="CLOSED BY SCAN", commit_hash, debug);
+                await closeWorkItem(adoClient, adoOrg, adoProject, workItemId, 'CLOSED BY SCAN', commit_hash, debug);
                 closedCount++;
                 
                 // Wait between API calls to avoid rate limiting
@@ -814,9 +893,13 @@ async function closePipelineFlaws(adoClient, adoOrg, adoProject, activeWorkItems
                 }
             }
         } catch (error) {
-            console.error(`Failed to close work item ${workItem.id}: ${error.message}`);
-            if (fail_build === 'true') {
-                throw error;
+            if (error.response && error.response.status === 400) {
+                console.log(`Work item ${workItem.id} not found (may have been deleted) - skipping closure: "${title}"`);
+            } else {
+                console.error(`Failed to close work item ${workItem.id}: ${error.message}`);
+                if (fail_build === 'true') {
+                    throw error;
+                }
             }
         }
     }
@@ -855,20 +938,20 @@ function populateDuplicateDetectionData(existingWorkItems, duplicateDetectionDat
         const workItemId = workItem.id;
         const workItemState = workItem.fields['System.State'] || 'Unknown';
         
-        // Extract Veracode Flaw ID from title
-        const veracodeFlawId = getVeracodeFlawIDFromTitle(title);
-        if (!veracodeFlawId) {
-            if (debug === 'true') {
-                console.log(`No Veracode Flaw ID found in title: "${title}"`);
-            }
-            return;
-        }
-        
         if (debug === 'true') {
-            console.log(`Processing existing work item ${workItemId}: "${title}" -> Veracode ID: ${veracodeFlawId}`);
+            console.log(`Processing existing work item ${workItemId}: "${title}"`);
         }
         
         if (scanType === 'pipeline') {
+            // Extract Veracode Flaw ID from title for pipeline scans
+            const veracodeFlawId = getVeracodeFlawIDFromTitle(title);
+            if (!veracodeFlawId) {
+                if (debug === 'true') {
+                    console.log(`No Veracode Flaw ID found in title: "${title}"`);
+                }
+                return;
+            }
+            
             // Parse pipeline flaw ID: [VID:CWE:filename:linenum]
             const flawInfo = parseVeracodeFlawID(veracodeFlawId);
             if (flawInfo && flawInfo.file) {
@@ -897,16 +980,21 @@ function populateDuplicateDetectionData(existingWorkItems, duplicateDetectionDat
                 }
             }
         } else {
-            // Parse policy flaw ID: [VID:FlawID]
-            const flawInfo = parseVeracodeFlawID(veracodeFlawId);
-            if (flawInfo && flawInfo.flawNum) {
-                const flawNum = parseInt(flawInfo.flawNum);
-                duplicateDetectionData.existingFlaws[flawNum] = true;
-                duplicateDetectionData.existingFlawNumbers[flawNum] = workItemId;
-                duplicateDetectionData.existingIssueStates[flawNum] = workItemState;
+            // Extract flaw ID directly from title for policy scans
+            // Title format: "Veracode Flaw (Static): [CWE Name], Flaw [ID]"
+            const flawIdMatch = title.match(/Flaw (\d+)/);
+            if (flawIdMatch) {
+                const flawId = flawIdMatch[1];
+                duplicateDetectionData.existingFlaws[flawId] = true;
+                duplicateDetectionData.existingFlawNumbers[flawId] = workItemId;
+                duplicateDetectionData.existingIssueStates[flawId] = workItemState;
                 
                 if (debug === 'true') {
-                    console.log(`Added policy flaw data: FlawNum=${flawNum}, WorkItem=${workItemId}`);
+                    console.log(`✅ Added policy flaw data: FlawId=${flawId}, WorkItem=${workItemId}`);
+                }
+            } else {
+                if (debug === 'true') {
+                    console.log(`❌ Failed to extract flaw ID from title: "${title}"`);
                 }
             }
         }
@@ -1004,19 +1092,59 @@ function pipelineIssueExists(flaw, duplicateDetectionData, debug) {
     return null;
 }
 
-// Policy-specific duplicate detection (exact matching)
+// Policy-specific duplicate detection (exact matching by flaw ID)
 function policyIssueExists(flaw, duplicateDetectionData) {
     const flawId = flaw.issue_id || 'Unknown';
-    const flawNum = parseInt(flawId);
     
-    if (duplicateDetectionData.existingFlaws[flawNum] === true) {
+    // Use flaw ID directly for deduplication
+    if (duplicateDetectionData.existingFlaws[flawId] === true) {
         return {
-            workItemId: duplicateDetectionData.existingFlawNumbers[flawNum],
-            workItemState: duplicateDetectionData.existingIssueStates[flawNum]
+            workItemId: duplicateDetectionData.existingFlawNumbers[flawId],
+            workItemState: duplicateDetectionData.existingIssueStates[flawId]
         };
     }
     
     return null;
+}
+
+// Helper function to process annotations and determine action (same logic as GitHub)
+function processAnnotationsADO(annotations) {
+    if (!annotations || annotations.length === 0) {
+        return { action: 'none', annotations: [] };
+    }
+    
+    // Sort all annotations by created date (most recent first)
+    const sortedAnnotations = annotations.sort((a, b) => new Date(b.created) - new Date(a.created));
+    
+    // Find the most recent APPROVED or REJECTED annotation (these take precedence)
+    const mostRecentApprovedOrRejected = sortedAnnotations.find(ann => 
+        ann.action === 'APPROVED' || ann.action === 'REJECTED'
+    );
+    
+    // If we have an APPROVED or REJECTED annotation, use it to determine the action
+    if (mostRecentApprovedOrRejected) {
+        if (mostRecentApprovedOrRejected.action === 'APPROVED') {
+            return { 
+                action: 'close', 
+                annotations: sortedAnnotations,
+                mostRecent: mostRecentApprovedOrRejected
+            };
+        } else if (mostRecentApprovedOrRejected.action === 'REJECTED') {
+            return { 
+                action: 'reopen', 
+                annotations: sortedAnnotations,
+                mostRecent: mostRecentApprovedOrRejected
+            };
+        }
+    }
+    
+    // If no APPROVED or REJECTED annotations, use the most recent annotation for update
+    const mostRecent = sortedAnnotations[0];
+    return { 
+        action: 'update', 
+        annotations: sortedAnnotations,
+        mostRecent: mostRecent
+    };
 }
 
 // ADO-specific pipeline flaws processing
@@ -1112,6 +1240,7 @@ async function processPolicyFlawsADO(adoPatchClient, adoOrg, adoProject, adoWork
     let createdCount = 0;
     let reopenedCount = 0;
     let skippedCount = 0;
+    let closedCount = 0;
     
     const flaws = flawData._embedded?.findings || [];
     console.log(`Processing ${flaws.length} policy flaws for ADO`);
@@ -1141,7 +1270,7 @@ async function processPolicyFlawsADO(adoPatchClient, adoOrg, adoProject, adoWork
             if (existingWorkItem) {
                 const workItemState = existingWorkItem.workItemState;
                 const workItemId = existingWorkItem.workItemId;
-                console.log(`Work item already exists for policy flaw ${flawId} (ID: ${workItemId}, State: ${workItemState})`);
+                console.log(`✅ DEDUPLICATION: Work item already exists for policy flaw ${flawId} (ID: ${workItemId}, State: ${workItemState})`);
                 
                 if (workItemState === 'Closed' || workItemState === 'Resolved') {
                     console.log(`Reopening closed work item ${workItemId} for flaw ${flawId}`);
@@ -1188,6 +1317,109 @@ async function processPolicyFlawsADO(adoPatchClient, adoOrg, adoProject, adoWork
             core.error(`Failed to process policy work item for flaw ${flaw.issue_id}: ${error.message}`);
             if (fail_build === 'true') {
                 throw error;
+            }
+        }
+    }
+    
+    // Process mitigation status and annotations for existing work items
+    console.log(`\nProcessing mitigation status and annotations...`);
+    for (const flaw of flaws) {
+        try {
+            const flawId = flaw.issue_id || 'Unknown';
+            const annotations = flaw.annotations || [];
+            const resolutionStatus = flaw.finding_status?.resolution_status;
+            
+            // Find existing work item for this flaw
+            const existingWorkItem = policyIssueExists(flaw, duplicateDetectionData);
+            
+            if (existingWorkItem) {
+                const workItemState = existingWorkItem.workItemState;
+                const workItemId = existingWorkItem.workItemId;
+                
+                // Process annotations to determine action (same logic as GitHub)
+                const annotationResult = processAnnotationsADO(annotations);
+                
+                // Check if flaw is mitigated (APPROVED status) - same logic as GitHub
+                if (resolutionStatus === 'APPROVED') {
+                    if (workItemState !== 'Closed' && workItemState !== 'Resolved' && workItemState !== 'Done') {
+                        console.log(`Closing work item ${workItemId} for flaw ${flawId} - finding has been mitigated (APPROVED status)`);
+                        await closeWorkItem(adoPatchClient, adoOrg, adoProject, workItemId, 'MITIGATED', commit_hash, debug);
+                        closedCount++;
+                        
+                        // Wait between API calls to avoid rate limiting
+                        await new Promise(resolve => setTimeout(resolve, waitTime * 1000));
+                    }
+                } else {
+                    // Flaw is NOT mitigated - check if work item should be reopened
+                    const isWorkItemClosed = workItemState === 'Closed' || workItemState === 'Resolved' || workItemState === 'Done';
+                    
+                    if (isWorkItemClosed) {
+                        console.log(`Reopening work item ${workItemId} for flaw ${flawId} - flaw is not mitigated but work item is closed`);
+                        
+                        try {
+                            await reopenWorkItem(adoPatchClient, adoOrg, adoProject, workItemId, {
+                                source_base_path_1,
+                                source_base_path_2,
+                                source_base_path_3,
+                                commit_hash,
+                                debug
+                            });
+                            reopenedCount++;
+                            console.log(`✅ Successfully reopened work item ${workItemId} for flaw ${flawId} (not mitigated)`);
+                            
+                            // Wait between API calls to avoid rate limiting
+                            await new Promise(resolve => setTimeout(resolve, waitTime * 1000));
+                        } catch (reopenError) {
+                            console.error(`❌ Failed to reopen work item ${workItemId} for flaw ${flawId}:`, reopenError.message);
+                            if (debug === 'true') {
+                                console.error('Reopen error details:', reopenError);
+                            }
+                        }
+                    }
+                }
+                
+                // Handle annotation-based actions (reopen if rejected)
+                if (annotationResult.action === 'reopen') {
+                    console.log(`Reopening work item ${workItemId} for flaw ${flawId} - most recent annotation is REJECTED`);
+                    
+                    // Reopen the work item if it's closed
+                    if (workItemState === 'Closed' || workItemState === 'Resolved' || workItemState === 'Done') {
+                        try {
+                            await reopenWorkItem(adoPatchClient, adoOrg, adoProject, workItemId, {
+                                source_base_path_1,
+                                source_base_path_2,
+                                source_base_path_3,
+                                commit_hash,
+                                debug
+                            });
+                            reopenedCount++;
+                            console.log(`✅ Successfully reopened work item ${workItemId} for flaw ${flawId}`);
+                            
+                            // Wait between API calls to avoid rate limiting
+                            await new Promise(resolve => setTimeout(resolve, waitTime * 1000));
+                        } catch (reopenError) {
+                            console.error(`❌ Failed to reopen work item ${workItemId} for flaw ${flawId}:`, reopenError.message);
+                            if (debug === 'true') {
+                                console.error('Reopen error details:', reopenError);
+                            }
+                        }
+                    } else {
+                        console.log(`Work item ${workItemId} is already open (State: ${workItemState}), no need to reopen`);
+                    }
+                }
+                
+                // Update work item with mitigation annotations (if any)
+                if (annotations.length > 0) {
+                    console.log(`Updating work item ${workItemId} with ${annotations.length} mitigation annotations`);
+                    await updateWorkItem(adoPatchClient, adoOrg, adoProject, workItemId, annotations, {
+                        commit_hash,
+                        debug
+                    });
+                }
+            }
+        } catch (error) {
+            if (debug === 'true') {
+                console.error(`Error processing mitigation status for flaw ${flaw.issue_id}:`, error.message);
             }
         }
     }

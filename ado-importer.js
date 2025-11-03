@@ -9,6 +9,9 @@ async function importFlawsToADO(params) {
         adoOrg,
         adoProject,
         adoWorkItemType,
+        adoOpenState,
+        adoCloseState,
+        adoReopenState,
         waitTime,
         source_base_path_1,
         source_base_path_2,
@@ -141,7 +144,7 @@ async function importFlawsToADO(params) {
     let closedCount = 0;
 
     if (scanType === 'pipeline') {
-        const result = await processPipelineFlawsADO(adoPatchClient, adoOrg, adoProject, adoWorkItemType, flawData, {
+        const result = await processPipelineFlawsADO(adoPatchClient, adoQueryClient, adoClient, adoOrg, adoProject, adoWorkItemType, flawData, {
             source_base_path_1,
             source_base_path_2,
             source_base_path_3,
@@ -151,14 +154,18 @@ async function importFlawsToADO(params) {
             debug,
             existingWorkItems,
             processedFlawIds,
-            duplicateDetectionData
+            duplicateDetectionData,
+            adoOpenState,
+            adoCloseState,
+            adoReopenState,
+            scanType: 'pipeline'
         });
         createdCount = result.createdCount;
         reopenedCount = result.reopenedCount;
         skippedCount = result.skippedCount;
-        closedCount = closePipelineFlaws(adoClient, adoOrg, adoProject, activeWorkItems, result.processedFlawIds, commit_hash, debug)
+        closedCount = closePipelineFlaws(adoClient, adoOrg, adoProject, activeWorkItems, result.processedFlawIds, commit_hash, debug, adoCloseState)
     } else {
-        const result = await processPolicyFlawsADO(adoPatchClient, adoOrg, adoProject, adoWorkItemType, flawData, {
+        const result = await processPolicyFlawsADO(adoPatchClient, adoQueryClient, adoClient, adoOrg, adoProject, adoWorkItemType, flawData, {
             source_base_path_1,
             source_base_path_2,
             source_base_path_3,
@@ -168,7 +175,11 @@ async function importFlawsToADO(params) {
             debug,
             existingWorkItems,
             processedFlawIds,
-            duplicateDetectionData
+            duplicateDetectionData,
+            adoOpenState,
+            adoCloseState,
+            adoReopenState,
+            scanType: 'policy'
         });
         createdCount = result.createdCount;
         reopenedCount = result.reopenedCount;
@@ -193,7 +204,7 @@ async function importFlawsToADO(params) {
             
             if (!isStillPresent) {
                 console.log(`Closing work item ${workItemId} - flaw no longer found in scan: "${title}"`);
-                await closeWorkItem(adoPatchClient, adoOrg, adoProject, workItemId, 'NOT_FOUND', commit_hash, debug);
+                await closeWorkItem(adoPatchClient, adoOrg, adoProject, workItemId, 'NOT_FOUND', commit_hash, debug, adoCloseState);
                 closedCount++;
                 
                 // Wait between API calls to avoid rate limiting
@@ -484,12 +495,21 @@ function formatMitigation(annotation){
     mitigation += "<b>Action:</b> " + action + "<br>";;
 
     if(!mitigationStatus.includes(action)){
-        mitigation += "<b>Technique:</b> " + technique + "<br/>";
-        mitigation += "<b>Specifics:</b> " + specifics + "<br>";
-        mitigation += "<b>Remaining Risk:</b> " + remaining_risk + "<br>";
-        mitigation += "<b>Verification:</b> " + verification + "<br>";
+        // Check if TSRV fields contain meaningful data (not all "Unknown")
+        const hasTSRVData = technique !== 'Unknown' || specifics !== 'Unknown' || remaining_risk !== 'Unknown' || verification !== 'Unknown';
+        
+        if (hasTSRVData) {
+            // Use TSRV format when we have meaningful data
+            mitigation += "<b>Technique:</b> " + technique + "<br/>";
+            mitigation += "<b>Specifics:</b> " + specifics + "<br>";
+            mitigation += "<b>Remaining Risk:</b> " + remaining_risk + "<br>";
+            mitigation += "<b>Verification:</b> " + verification + "<br>";
+        } else {
+            // Fall back to comment format when TSRV data is not available
+            mitigation += "<b>Comment:</b> " + comment + "<br>";
+        }
     } else {
-        mitigation += "<b>Comment:</b>" + comment;
+        mitigation += "<b>Comment:</b> " + comment + "<br>";
     }
 
     return { mitigation_title, mitigation }
@@ -510,9 +530,49 @@ async function checkExistingComments(adoClient, url, workItemId){
     }
 }
 
+// Normalize HTML/text for robust duplicate detection
+function normalizeTextForCompare(text) {
+    if (!text) return '';
+    try {
+        const noHtml = String(text).replace(/<[^>]*>/g, ' ');
+        return noHtml.replace(/\s+/g, ' ').trim().toLowerCase();
+    } catch (_) {
+        return String(text).toLowerCase();
+    }
+}
+
+// Fetch all previous System.History additions for a work item via Updates API
+async function fetchWorkItemHistoryEntries(adoClient, adoOrg, adoProject, workItemId, debug) {
+    const pageSize = 200;
+    let skip = 0;
+    let allHistory = [];
+    while (true) {
+        const updatesUrl = `/${adoOrg}/${adoProject}/_apis/wit/workItems/${workItemId}/updates?$top=${pageSize}&$skip=${skip}&api-version=7.0`;
+        if (debug === 'true') {
+            console.log(`Fetching work item updates: ${updatesUrl}`);
+        }
+        const res = await adoClient.get(updatesUrl);
+        const values = res.data?.value || [];
+        for (const upd of values) {
+            const fields = upd.fields || {};
+            const hist = fields['System.History'];
+            // Can appear as { newValue: 'text', oldValue: '...' } or direct string in some templates
+            if (hist) {
+                if (typeof hist === 'string') {
+                    allHistory.push(hist);
+                } else if (typeof hist.newValue === 'string') {
+                    allHistory.push(hist.newValue);
+                }
+            }
+        }
+        if (values.length < pageSize) break;
+        skip += pageSize;
+    }
+    return allHistory;
+}
+
 async function updateWorkItem(adoClient, adoOrg, adoProject, workItemId, annotations, params) {
-    const { commit_hash, debug } = params;
-    const url = `/${adoOrg}/${adoProject}/_apis/wit/workItems/${workItemId}/comments?api-version=7.0-preview.3`;
+    const { commit_hash, debug, workItemType } = params;
     
     const sorted_annotations = annotations.sort(function(a, b){
         const dateA = new Date(a.created);
@@ -520,19 +580,59 @@ async function updateWorkItem(adoClient, adoOrg, adoProject, workItemId, annotat
         return dateA - dateB;
     })
 
-    for(const annot of sorted_annotations){
-        const { mitigation_title, mitigation } = formatMitigation(annot)
-        const comments = await checkExistingComments(adoClient, url, workItemId)
+    if (workItemType === 'Bug') {
+        // For Bug work items, add mitigation information to Discussion field individually
+        // Use Updates API to gather all existing discussion entries to avoid duplicates reliably
+        const historyEntries = await fetchWorkItemHistoryEntries(adoClient, adoOrg, adoProject, workItemId, debug);
+        const existingSet = new Set(historyEntries.map(normalizeTextForCompare));
+        const workItemUrl = `/${adoOrg}/${adoProject}/_apis/wit/workitems/${workItemId}?api-version=7.0`;
 
-        let duplicate_comment = comments.find(({text}) => text.startsWith(mitigation_title))
+        for (const annot of sorted_annotations) {
+            const { mitigation_title, mitigation } = formatMitigation(annot);
+            const key = normalizeTextForCompare(mitigation);
+            if (!existingSet.has(key)) {
+                const payload = [
+                    {
+                        op: 'add',
+                        path: '/fields/System.History',
+                        value: mitigation
+                    }
+                ];
+                try {
+                    await adoClient.patch(workItemUrl, payload, {
+                        headers: {
+                            'Content-Type': 'application/json-patch+json'
+                        }
+                    });
+                    existingSet.add(key);
+                    if (debug === 'true') {
+                        console.log(`Added mitigation "${mitigation_title}" to Bug work item ${workItemId} Discussion field`);
+                    }
+                } catch (error) {
+                    console.error(`Failed to add mitigation "${mitigation_title}" to Bug work item ${workItemId}:`, error.message);
+                }
+            } else if (debug === 'true') {
+                console.log(`Skipping duplicate mitigation "${mitigation_title}" found in Bug work item ${workItemId} Discussion`);
+            }
+        }
+    } else {
+        // For Issue work items, use comments (existing behavior)
+        const url = `/${adoOrg}/${adoProject}/_apis/wit/workItems/${workItemId}/comments?api-version=7.0-preview.3`;
         
-        if(duplicate_comment === undefined){
-            const payload = { text: mitigation }
+        for(const annot of sorted_annotations){
+            const { mitigation_title, mitigation } = formatMitigation(annot)
+            const comments = await checkExistingComments(adoClient, url, workItemId)
+
+            let duplicate_comment = comments.find(({text}) => text.startsWith(mitigation_title))
             
-            addComment(adoClient, url, workItemId, payload, debug)
-        } else {
-            if(debug === 'true'){
-                console.log(`Skipping duplicate comment found for work item ${workItemId} with ${mitigation_title}`);
+            if(duplicate_comment === undefined){
+                const payload = { text: mitigation }
+                
+                addComment(adoClient, url, workItemId, payload, debug)
+            } else {
+                if(debug === 'true'){
+                    console.log(`Skipping duplicate comment found for work item ${workItemId} with ${mitigation_title}`);
+                }
             }
         }
     }
@@ -557,15 +657,32 @@ async function addComment(adoClient, url, workItemId, payload, debug){
 }
 
 async function reopenWorkItem(adoClient, adoOrg, adoProject, workItemId, params) {
-    const { source_base_path_1, source_base_path_2, source_base_path_3, commit_hash, debug } = params;
+    const { source_base_path_1, source_base_path_2, source_base_path_3, commit_hash, debug, adoReopenState } = params;
     
     const url = `/${adoOrg}/${adoProject}/_apis/wit/workitems/${workItemId}?api-version=7.0`;
     
-    // Try different "open" states for different ADO processes
-    const candidateStates = ['To Do', 'Active', 'New', 'Open'];
+    // Check if reopening comment already exists to avoid duplicates using Updates API
+    const expectedComment = `Reopened by Veracode scan - Commit: ${commit_hash || 'Unknown'}`;
+    let existingReopenComment = false;
+    try {
+        const historyEntries = await fetchWorkItemHistoryEntries(adoClient, adoOrg, adoProject, workItemId, debug);
+        const existingSet = new Set(historyEntries.map(normalizeTextForCompare));
+        existingReopenComment = existingSet.has(normalizeTextForCompare(expectedComment));
+    } catch (error) {
+        console.error(`Failed to check existing history for work item ${workItemId}:`, error.message);
+    }
+    
+    // Use configurable reopen state, with fallback to common states
+    const candidateStates = adoReopenState ? [adoReopenState] : ['To Do', 'Active', 'New', 'Open'];
     
     for (const state of candidateStates) {
-        const payload = [
+        const payload = existingReopenComment ? [
+            {
+                op: 'replace',
+                path: '/fields/System.State',
+                value: state
+            }
+        ] : [
             {
                 op: 'replace',
                 path: '/fields/System.State',
@@ -574,7 +691,7 @@ async function reopenWorkItem(adoClient, adoOrg, adoProject, workItemId, params)
             {
                 op: 'add',
                 path: '/fields/System.History',
-                value: `Reopened by Veracode scan - Commit: ${commit_hash || 'Unknown'}`
+                value: expectedComment
             }
         ];
 
@@ -613,7 +730,7 @@ async function reopenWorkItem(adoClient, adoOrg, adoProject, workItemId, params)
 }
 
 async function createWorkItem(adoClient, adoOrg, project, workItemType, flaw, params) {
-    const { source_base_path_1, source_base_path_2, source_base_path_3, commit_hash, debug, scanType } = params;
+    const { source_base_path_1, source_base_path_2, source_base_path_3, commit_hash, debug, scanType, adoOpenState } = params;
 
     // Extract fields for title and tags based on scan type
     const flawId = flaw.issue_id || 'Unknown';
@@ -652,28 +769,70 @@ async function createWorkItem(adoClient, adoOrg, project, workItemType, flaw, pa
         title = `${baseTitle} ('${category}')`;
     }
     
-    const payload = [
-        {
-            op: 'add',
-            path: '/fields/System.Title',
-            value: title
-        },
-        {
-            op: 'add',
-            path: '/fields/System.Description',
-            value: description
-        },
-        {
-            op: 'add',
-            path: '/fields/System.Tags',
-            value: tags
-        },
-        {
-            op: 'add',
-            path: '/fields/Microsoft.VSTS.Common.Severity',
-            value: mapSeverity(scanType === 'pipeline' ? flaw.severity : flaw.finding_details?.severity)
-        }
-    ];
+    // Create payload based on work item type
+    let payload;
+    // Normalize type comparison to be case-insensitive
+    if (String(workItemType).toLowerCase() === 'bug') {
+        // Bug work item type - use Repro Steps field for description
+        // Some ADO processes map description differently. To be robust, we set BOTH
+        // Repro Steps and System.Description so the content shows regardless of template.
+        payload = [
+            {
+                op: 'add',
+                path: '/fields/System.Title',
+                value: title
+            },
+            {
+                op: 'add',
+                path: '/fields/Microsoft.VSTS.TCM.ReproSteps',
+                value: description
+            },
+            {
+                op: 'add',
+                path: '/fields/System.Description',
+                value: description
+            },
+            {
+                op: 'add',
+                path: '/fields/System.Tags',
+                value: tags
+            },
+            {
+                op: 'add',
+                path: '/fields/Microsoft.VSTS.Common.Severity',
+                value: mapSeverity(scanType === 'pipeline' ? flaw.severity : flaw.finding_details?.severity)
+            },
+            {
+                op: 'add',
+                path: '/fields/System.State',
+                value: adoOpenState || 'New'
+            }
+        ];
+    } else {
+        // Issue work item type - use Description field (existing behavior)
+        payload = [
+            {
+                op: 'add',
+                path: '/fields/System.Title',
+                value: title
+            },
+            {
+                op: 'add',
+                path: '/fields/System.Description',
+                value: description
+            },
+            {
+                op: 'add',
+                path: '/fields/System.Tags',
+                value: tags
+            },
+            {
+                op: 'add',
+                path: '/fields/Microsoft.VSTS.Common.Severity',
+                value: mapSeverity(scanType === 'pipeline' ? flaw.severity : flaw.finding_details?.severity)
+            }
+        ];
+    }
 
     if (debug === 'true') {
         console.log('Creating work item with:');
@@ -685,6 +844,59 @@ async function createWorkItem(adoClient, adoOrg, project, workItemType, flaw, pa
         console.log('Payload:', JSON.stringify(payload, null, 2));
     }
 
+    // For Bug, we might need to adapt payload to process templates. Try candidates when needed.
+    const isBug = String(workItemType).toLowerCase() === 'bug';
+    if (isBug) {
+        // Build candidate payloads derived from the primary Bug payload above
+        const baseAdds = payload.filter(p => p.path !== '/fields/Microsoft.VSTS.TCM.ReproSteps' && p.path !== '/fields/System.Description');
+        const repro = { op: 'add', path: '/fields/Microsoft.VSTS.TCM.ReproSteps', value: description };
+        const desc  = { op: 'add', path: '/fields/System.Description', value: description };
+        const candidates = [
+            [...baseAdds, repro, desc],
+            [...baseAdds, repro],
+            [...baseAdds, desc],
+            [...baseAdds]
+        ];
+
+        for (let i = 0; i < candidates.length; i++) {
+            try {
+                if (debug === 'true') {
+                    console.log(`Posting Bug create with candidate #${i+1}`);
+                }
+                const response = await adoClient.post(url, candidates[i], {
+                    headers: { 'Content-Type': 'application/json-patch+json' }
+                });
+                if (debug === 'true') {
+                    console.log('Response:', JSON.stringify(response.data, null, 2));
+                }
+                // If last candidate (no description fields) was used, add description to Discussion
+                if (i === candidates.length - 1) {
+                    try {
+                        const discussUrl = `/${adoOrg}/${project}/_apis/wit/workitems/${response.data.id}?api-version=7.0`;
+                        const discussPayload = [{ op: 'add', path: '/fields/System.History', value: description }];
+                        await adoClient.patch(discussUrl, discussPayload, { headers: { 'Content-Type': 'application/json-patch+json' } });
+                    } catch (e) {
+                        console.error(`Failed to backfill Discussion for Bug ${response.data?.id}: ${e.message}`);
+                    }
+                }
+                return response.data;
+            } catch (error) {
+                const status = error?.response?.status;
+                console.error(`Bug create candidate #${i+1} failed${status ? ` (status ${status})` : ''}: ${error.message}`);
+                if (error?.response?.data) {
+                    console.error('ADO response:', JSON.stringify(error.response.data));
+                }
+                if (!(status && (status === 400 || status === 422))) {
+                    throw error;
+                }
+                // try next
+            }
+        }
+        // If all candidates failed, throw
+        throw new Error('Failed to create Bug work item after trying all payload variants');
+    }
+
+    // Non-Bug types: single post as before
     try {
         const response = await adoClient.post(url, payload, {
             headers: {
@@ -696,14 +908,10 @@ async function createWorkItem(adoClient, adoOrg, project, workItemType, flaw, pa
         }
         return response.data;
     } catch (error) {
-        if (debug === 'true') {
-            console.error('Error creating work item:');
-            console.error('Status:', error.response?.status);
-            console.error('Data:', error.response?.data);
-            console.error('Headers:', error.response?.headers);
-            console.error('Request URL:', error.config?.url);
-            console.error('Request Method:', error.config?.method);
-            console.error('Request Headers:', error.config?.headers);
+        console.error('Error creating work item:', error.message);
+        if (error.response) {
+            console.error('Status:', error.response.status);
+            console.error('Data:', error.response.data);
         }
         throw error;
     }
@@ -802,7 +1010,7 @@ function mapSeverity(veracodeSeverity) {
     return severityMap[veracodeSeverity] || '3 - Medium';
 }
 
-async function closeWorkItem(adoClient, adoOrg, adoProject, workItemId, resolution, commit_hash, debug) {
+async function closeWorkItem(adoClient, adoOrg, adoProject, workItemId, resolution, commit_hash, debug, adoCloseState) {
     const url = `/${adoOrg}/${adoProject}/_apis/wit/workitems/${workItemId}?api-version=7.0`;
 
     // Create appropriate closure message based on resolution
@@ -815,11 +1023,27 @@ async function closeWorkItem(adoClient, adoOrg, adoProject, workItemId, resoluti
         closureMessage = `This work item has been automatically closed by Veracode automation. Closed by Veracode scan from commit ${commit_hash || 'Unknown'}.`;
     }
 
-    // Different ADO processes have different state names. Try a few common ones.
-    const candidateStates = ['Done', 'Closed', 'Resolved', 'Completed'];
+    // Check if closure comment already exists to avoid duplicates using Updates API
+    let existingCloseComment = false;
+    try {
+        const historyEntries = await fetchWorkItemHistoryEntries(adoClient, adoOrg, adoProject, workItemId, debug);
+        const existingSet = new Set(historyEntries.map(normalizeTextForCompare));
+        existingCloseComment = existingSet.has(normalizeTextForCompare(closureMessage));
+    } catch (error) {
+        console.error(`Failed to check existing history for work item ${workItemId}:`, error.message);
+    }
+
+    // Use configurable close state, with fallback to common states
+    const candidateStates = adoCloseState ? [adoCloseState] : ['Done', 'Closed', 'Resolved', 'Completed'];
 
     for (const state of candidateStates) {
-        const payload = [
+        const payload = existingCloseComment ? [
+            {
+                op: 'replace',
+                path: '/fields/System.State',
+                value: state
+            }
+        ] : [
             {
                 op: 'replace',
                 path: '/fields/System.State',
@@ -866,7 +1090,7 @@ async function closeWorkItem(adoClient, adoOrg, adoProject, workItemId, resoluti
     throw new Error(`Failed to close work item ${workItemId}: none of the candidate states were accepted (${candidateStates.join(', ')})`);
 }
 
-async function closePipelineFlaws(adoClient, adoOrg, adoProject, activeWorkItems, processedFlawIds, commit_hash, debug){
+async function closePipelineFlaws(adoClient, adoOrg, adoProject, activeWorkItems, processedFlawIds, commit_hash, debug, adoCloseState){
     // Close work items that are no longer present in the scan results
     console.log(`\nChecking for work items to close (flaws not found in current scan)...`);
     
@@ -882,7 +1106,7 @@ async function closePipelineFlaws(adoClient, adoOrg, adoProject, activeWorkItems
             
             if (!isStillPresent) {
                 console.log(`Closing work item ${workItemId} - flaw no longer found in scan: "${title}"`);
-                await closeWorkItem(adoClient, adoOrg, adoProject, workItemId, 'CLOSED BY SCAN', commit_hash, debug);
+                await closeWorkItem(adoClient, adoOrg, adoProject, workItemId, 'CLOSED BY SCAN', commit_hash, debug, adoCloseState);
                 closedCount++;
                 
                 // Wait between API calls to avoid rate limiting
@@ -1148,8 +1372,12 @@ function processAnnotationsADO(annotations) {
 }
 
 // ADO-specific pipeline flaws processing
-async function processPipelineFlawsADO(adoPatchClient, adoOrg, adoProject, adoWorkItemType, flawData, params) {
-    const { source_base_path_1, source_base_path_2, source_base_path_3, commit_hash, waitTime, fail_build, debug, existingWorkItems, processedFlawIds, duplicateDetectionData } = params;
+async function processPipelineFlawsADO(adoPatchClient, adoQueryClient, adoClient, adoOrg, adoProject, adoWorkItemType, flawData, params) {
+    const { source_base_path_1, source_base_path_2, source_base_path_3, commit_hash, waitTime, fail_build, debug, existingWorkItems, processedFlawIds, duplicateDetectionData, adoOpenState, adoCloseState, adoReopenState, scanType } = params;
+    
+    // Local references that can be updated
+    let currentExistingWorkItems = existingWorkItems;
+    let currentDuplicateDetectionData = duplicateDetectionData;
     
     let createdCount = 0;
     let reopenedCount = 0;
@@ -1175,7 +1403,7 @@ async function processPipelineFlawsADO(adoPatchClient, adoOrg, adoProject, adoWo
             }
             
             // Check if work item already exists using pipeline-specific fuzzy matching
-            const existingWorkItem = pipelineIssueExists(flaw, duplicateDetectionData, debug);
+            const existingWorkItem = pipelineIssueExists(flaw, currentDuplicateDetectionData, debug);
             
             if (existingWorkItem) {
                 const workItemState = existingWorkItem.workItemState;
@@ -1189,7 +1417,8 @@ async function processPipelineFlawsADO(adoPatchClient, adoOrg, adoProject, adoWo
                         source_base_path_2,
                         source_base_path_3,
                         commit_hash,
-                        debug
+                        debug,
+                        adoReopenState
                     });
                     reopenedCount++;
                 } else {
@@ -1205,7 +1434,8 @@ async function processPipelineFlawsADO(adoPatchClient, adoOrg, adoProject, adoWo
                     source_base_path_3,
                     commit_hash,
                     debug,
-                    scanType: 'pipeline'
+                    scanType: 'pipeline',
+                    adoOpenState
                 });
 
                 console.log(`Successfully created work item ${workItem.id} for flaw ${flawId}`);
@@ -1234,8 +1464,12 @@ async function processPipelineFlawsADO(adoPatchClient, adoOrg, adoProject, adoWo
 }
 
 // ADO-specific policy flaws processing
-async function processPolicyFlawsADO(adoPatchClient, adoOrg, adoProject, adoWorkItemType, flawData, params) {
-    const { source_base_path_1, source_base_path_2, source_base_path_3, commit_hash, waitTime, fail_build, debug, existingWorkItems, processedFlawIds, duplicateDetectionData } = params;
+async function processPolicyFlawsADO(adoPatchClient, adoQueryClient, adoClient, adoOrg, adoProject, adoWorkItemType, flawData, params) {
+    const { source_base_path_1, source_base_path_2, source_base_path_3, commit_hash, waitTime, fail_build, debug, existingWorkItems, processedFlawIds, duplicateDetectionData, adoOpenState, adoCloseState, adoReopenState, scanType } = params;
+    
+    // Local references that can be updated
+    let currentExistingWorkItems = existingWorkItems;
+    let currentDuplicateDetectionData = duplicateDetectionData;
     
     let createdCount = 0;
     let reopenedCount = 0;
@@ -1265,21 +1499,27 @@ async function processPolicyFlawsADO(adoPatchClient, adoOrg, adoProject, adoWork
             }
             
             // Check if work item already exists using policy-specific exact matching
-            const existingWorkItem = policyIssueExists(flaw, duplicateDetectionData);
+            const existingWorkItem = policyIssueExists(flaw, currentDuplicateDetectionData);
             
             if (existingWorkItem) {
                 const workItemState = existingWorkItem.workItemState;
                 const workItemId = existingWorkItem.workItemId;
                 console.log(`✅ DEDUPLICATION: Work item already exists for policy flaw ${flawId} (ID: ${workItemId}, State: ${workItemState})`);
-                
-                if (workItemState === 'Closed' || workItemState === 'Resolved') {
+
+                // Guard: do NOT reopen if the flaw is mitigated (APPROVED) even if the work item is closed.
+                const resolutionStatusEarly = flaw.finding_status?.resolution_status;
+                const isClosedState = workItemState === 'Closed' || workItemState === 'Resolved' || workItemState === 'Done';
+                const shouldReopen = isClosedState && resolutionStatusEarly !== 'APPROVED';
+
+                if (shouldReopen) {
                     console.log(`Reopening closed work item ${workItemId} for flaw ${flawId}`);
                     await reopenWorkItem(adoPatchClient, adoOrg, adoProject, workItemId, {
                         source_base_path_1,
                         source_base_path_2,
                         source_base_path_3,
                         commit_hash,
-                        debug
+                        debug,
+                        adoReopenState
                     });
                     reopenedCount++;
                 } else {
@@ -1296,7 +1536,8 @@ async function processPolicyFlawsADO(adoPatchClient, adoOrg, adoProject, adoWork
                     source_base_path_3,
                     commit_hash,
                     debug,
-                    scanType: 'policy'
+                    scanType: 'policy',
+                    adoOpenState
                 });
 
                 console.log(`Successfully created work item ${workItem.id} for flaw ${flawId}`);
@@ -1321,6 +1562,35 @@ async function processPolicyFlawsADO(adoPatchClient, adoOrg, adoProject, adoWork
         }
     }
     
+    // Refresh existing work items and duplicate detection data if new work items were created
+    // This ensures newly created work items are included in mitigation processing
+    if (createdCount > 0) {
+        console.log(`\nRefreshing existing work items list (${createdCount} new work item(s) created)...`);
+        try {
+            currentExistingWorkItems = await getExistingWorkItems(adoQueryClient, adoClient, adoOrg, adoProject, debug);
+            console.log(`Found ${currentExistingWorkItems.length} existing work items after refresh`);
+            
+            // Re-initialize duplicate detection data structure
+            currentDuplicateDetectionData = {
+                existingFlaws: {}, // flawNumber -> true
+                existingFlawNumbers: {}, // flawNumber -> workItemId
+                existingIssueStates: {} // flawNumber -> workItemState
+            };
+            
+            // Re-populate duplicate detection data with refreshed work items
+            populateDuplicateDetectionData(currentExistingWorkItems, currentDuplicateDetectionData, scanType, debug);
+            
+            if (debug === 'true') {
+                console.log('Duplicate detection data refreshed with newly created work items');
+            }
+        } catch (error) {
+            console.error(`Failed to refresh existing work items: ${error.message}`);
+            if (debug === 'true') {
+                console.error('Continuing with original data, but newly created work items may not be processed for mitigations');
+            }
+        }
+    }
+    
     // Process mitigation status and annotations for existing work items
     console.log(`\nProcessing mitigation status and annotations...`);
     for (const flaw of flaws) {
@@ -1329,8 +1599,8 @@ async function processPolicyFlawsADO(adoPatchClient, adoOrg, adoProject, adoWork
             const annotations = flaw.annotations || [];
             const resolutionStatus = flaw.finding_status?.resolution_status;
             
-            // Find existing work item for this flaw
-            const existingWorkItem = policyIssueExists(flaw, duplicateDetectionData);
+            // Find existing work item for this flaw (using refreshed data)
+            const existingWorkItem = policyIssueExists(flaw, currentDuplicateDetectionData);
             
             if (existingWorkItem) {
                 const workItemState = existingWorkItem.workItemState;
@@ -1343,7 +1613,7 @@ async function processPolicyFlawsADO(adoPatchClient, adoOrg, adoProject, adoWork
                 if (resolutionStatus === 'APPROVED') {
                     if (workItemState !== 'Closed' && workItemState !== 'Resolved' && workItemState !== 'Done') {
                         console.log(`Closing work item ${workItemId} for flaw ${flawId} - finding has been mitigated (APPROVED status)`);
-                        await closeWorkItem(adoPatchClient, adoOrg, adoProject, workItemId, 'MITIGATED', commit_hash, debug);
+                        await closeWorkItem(adoPatchClient, adoOrg, adoProject, workItemId, 'MITIGATED', commit_hash, debug, adoCloseState);
                         closedCount++;
                         
                         // Wait between API calls to avoid rate limiting
@@ -1362,7 +1632,8 @@ async function processPolicyFlawsADO(adoPatchClient, adoOrg, adoProject, adoWork
                                 source_base_path_2,
                                 source_base_path_3,
                                 commit_hash,
-                                debug
+                                debug,
+                        adoReopenState
                             });
                             reopenedCount++;
                             console.log(`✅ Successfully reopened work item ${workItemId} for flaw ${flawId} (not mitigated)`);
@@ -1390,7 +1661,8 @@ async function processPolicyFlawsADO(adoPatchClient, adoOrg, adoProject, adoWork
                                 source_base_path_2,
                                 source_base_path_3,
                                 commit_hash,
-                                debug
+                                debug,
+                        adoReopenState
                             });
                             reopenedCount++;
                             console.log(`✅ Successfully reopened work item ${workItemId} for flaw ${flawId}`);
@@ -1413,7 +1685,8 @@ async function processPolicyFlawsADO(adoPatchClient, adoOrg, adoProject, adoWork
                     console.log(`Updating work item ${workItemId} with ${annotations.length} mitigation annotations`);
                     await updateWorkItem(adoPatchClient, adoOrg, adoProject, workItemId, annotations, {
                         commit_hash,
-                        debug
+                        debug,
+                        workItemType: adoWorkItemType
                     });
                 }
             }

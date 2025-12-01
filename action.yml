@@ -37,6 +37,9 @@ inputs:
   repo_name:
     description: repo name
     required: false
+  context_name:
+    description: (Application Profile/ Sandbox / Project ) Name for Tickets
+    required: false
 
 
 runs:
